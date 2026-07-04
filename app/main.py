@@ -1,12 +1,13 @@
 """
 Token Bucket Rate Limiter Service.
 
-Phase 2: the /check endpoint — read state from Redis, decide with the
-pure algorithm, write state back.
+Phase 3: per-client configuration via an admin endpoint.
+- config:{client}  -> the rules   (requests_per_second, burst_size)
+- bucket:{client}  -> the state   (tokens, last_refill)
+Unknown clients fall back to DEFAULT_CONFIG.
 
-KNOWN LIMITATION (deliberate): the read->decide->write cycle is NOT
-atomic yet. Two concurrent requests for the same client can read the
-same state and double-spend a token. Proven and fixed in Phase 4.
+KNOWN LIMITATION (deliberate): read->decide->write still not atomic.
+Fixed in Phase 4.
 """
 
 import os
@@ -14,7 +15,7 @@ import time
 
 import redis
 from fastapi import FastAPI, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.token_bucket import BucketConfig, BucketState, check, new_bucket
 
@@ -23,28 +24,51 @@ app = FastAPI(title="Token Bucket Rate Limiter")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
-# Phase 2: one shared default config for every client.
-# Phase 3 replaces this with per-client config via an admin endpoint.
 DEFAULT_CONFIG = BucketConfig(capacity=5, refill_rate=1)
 
 
+# ---------- request/response models ----------
+
 class CheckRequest(BaseModel):
-    """Body of POST /check. Pydantic validates it automatically:
-    a request without client_key is rejected with 422 before our code runs."""
     client_key: str
 
 
+class ConfigRequest(BaseModel):
+    """Admin sets a client's limits. Field(...) adds validation:
+    gt=0 -> must be greater than 0, ge=1 -> at least 1.
+    Bad input is rejected with 422 before our code even runs."""
+    client_key: str
+    requests_per_second: float = Field(gt=0)
+    burst_size: float = Field(ge=1)
+
+
+# ---------- redis key helpers ----------
+
 def bucket_key(client_key: str) -> str:
-    """Namespaced Redis key: one flat keyspace, so prefixes act as folders."""
     return f"bucket:{client_key}"
 
 
-def load_state(client_key: str, now: float) -> BucketState:
-    """READ step. Missing hash = first time we see this client = full bucket."""
+def config_key(client_key: str) -> str:
+    return f"config:{client_key}"
+
+
+# ---------- load/save ----------
+
+def load_config(client_key: str) -> BucketConfig:
+    """Custom config if the admin set one, otherwise the safe default."""
+    raw = redis_client.hgetall(config_key(client_key))
+    if not raw:
+        return DEFAULT_CONFIG
+    return BucketConfig(
+        capacity=float(raw["burst_size"]),
+        refill_rate=float(raw["requests_per_second"]),
+    )
+
+
+def load_state(client_key: str, config: BucketConfig, now: float) -> BucketState:
     raw = redis_client.hgetall(bucket_key(client_key))
     if not raw:
-        return new_bucket(DEFAULT_CONFIG, now)
-    # Redis stores strings; convert back to floats.
+        return new_bucket(config, now)
     return BucketState(
         tokens=float(raw["tokens"]),
         last_refill=float(raw["last_refill"]),
@@ -52,28 +76,24 @@ def load_state(client_key: str, now: float) -> BucketState:
 
 
 def save_state(client_key: str, state: BucketState) -> None:
-    """WRITE step."""
     redis_client.hset(
         bucket_key(client_key),
         mapping={"tokens": state.tokens, "last_refill": state.last_refill},
     )
 
 
+# ---------- endpoints ----------
+
 @app.post("/check")
 def check_rate_limit(body: CheckRequest, response: Response) -> dict:
-    """
-    The core endpoint: ALLOW or DENY for one client's request.
-    HTTP 200 = ALLOW, HTTP 429 (Too Many Requests) = DENY.
-    """
-    now = time.time()  # the ONE place we read the real clock
-
-    state = load_state(body.client_key, now)          # READ
-    # <-- race window: another request can read the same state right here
-    decision = check(DEFAULT_CONFIG, state, now)      # DECIDE (pure, tested)
+    now = time.time()
+    config = load_config(body.client_key)             # NEW: per-client rules
+    state = load_state(body.client_key, config, now)  # READ
+    decision = check(config, state, now)              # DECIDE (pure, tested)
     save_state(body.client_key, decision.new_state)   # WRITE
 
     if not decision.allowed:
-        response.status_code = 429  # standard "Too Many Requests"
+        response.status_code = 429
 
     return {
         "decision": "ALLOW" if decision.allowed else "DENY",
@@ -82,9 +102,38 @@ def check_rate_limit(body: CheckRequest, response: Response) -> dict:
     }
 
 
+@app.post("/admin/config")
+def set_config(body: ConfigRequest) -> dict:
+    """Create or update a client's limits. Takes effect on their next request."""
+    redis_client.hset(
+        config_key(body.client_key),
+        mapping={
+            "requests_per_second": body.requests_per_second,
+            "burst_size": body.burst_size,
+        },
+    )
+    return {
+        "message": f"config saved for '{body.client_key}'",
+        "requests_per_second": body.requests_per_second,
+        "burst_size": body.burst_size,
+    }
+
+
+@app.get("/admin/config/{client_key}")
+def get_config(client_key: str) -> dict:
+    """Inspect a client's effective limits (custom or default)."""
+    cfg = load_config(client_key)
+    is_custom = bool(redis_client.exists(config_key(client_key)))
+    return {
+        "client_key": client_key,
+        "requests_per_second": cfg.refill_rate,
+        "burst_size": cfg.capacity,
+        "source": "custom" if is_custom else "default",
+    }
+
+
 @app.get("/health")
 def health() -> dict:
-    """Liveness check: proves app AND Redis are reachable."""
     try:
         redis_ok = redis_client.ping()
     except redis.exceptions.ConnectionError:
