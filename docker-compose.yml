@@ -1,18 +1,22 @@
 services:
   api:
-    build: .                      # build from our Dockerfile
+    build: .
     ports:
-      - "8000:8000"               # your Windows port 8000 -> container port 8000
+      - "8000:8000"
     environment:
-      - REDIS_URL=redis://redis:6379/0   # "redis" = the container name below
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
-      - redis                     # start Redis before the api
+      - redis
+    volumes:
+      - .:/app                    # your live folder replaces the baked-in copy
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0",
+              "--port", "8000", "--reload"]   # auto-restart on code change
 
   redis:
-    image: redis:7-alpine         # official tiny Redis image — no install needed
-    command: ["redis-server", "--appendonly", "yes"]   # WRITE DATA TO DISK (Req #3!)
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
-      - redis-data:/data          # keep that disk data in a named volume
+      - redis-data:/data
 
 volumes:
-  redis-data:                     # survives container restarts & rebuilds
+  redis-data:
