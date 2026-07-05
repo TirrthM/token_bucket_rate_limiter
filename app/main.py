@@ -1,21 +1,19 @@
 """
 Token Bucket Rate Limiter Service.
 
-Phase 5: two algorithms, selectable per client via admin config.
-- token_bucket   : allows bursts, smooth sustained rate (default)
-- sliding_window : hard cap on requests in ANY rolling window (exact,
-                   implemented as a timestamp log in a Redis sorted set)
-
-Both algorithms run as atomic Lua scripts inside Redis (Phase 4 lesson:
-mutual exclusion lives where the state lives).
+Phase 6: standard rate-limit headers on every response:
+  X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset
+Both Lua scripts now also compute and return "reset" =
+seconds until the client regains capacity.
 """
 
+import math
 import os
-from typing import Literal, Optional
+from typing import Literal
 
 import redis
-from fastapi import FastAPI, HTTPException, Response
-from pydantic import BaseModel, Field, model_validator
+from fastapi import FastAPI, Response
+from pydantic import BaseModel, Field
 
 app = FastAPI(title="Token Bucket Rate Limiter")
 
@@ -23,7 +21,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
 # ---------------------------------------------------------------------------
-# Lua script 1: token bucket (unchanged from Phase 4)
+# Lua script 1: token bucket (atomic). Returns {allowed, remaining, reset}.
 # ---------------------------------------------------------------------------
 TOKEN_BUCKET_LUA = """
 local key         = KEYS[1]
@@ -53,16 +51,18 @@ if tokens >= 1 then
 end
 
 redis.call('HSET', key, 'tokens', tokens, 'last_refill', now)
-return {allowed, tostring(tokens)}
+
+-- reset: seconds until at least 1 token exists (0 if one already does)
+local reset = 0
+if tokens < 1 then
+  reset = (1 - tokens) / refill_rate
+end
+
+return {allowed, tostring(tokens), tostring(reset)}
 """
 
 # ---------------------------------------------------------------------------
-# Lua script 2: sliding window log (NEW)
-# Sorted set: score = timestamp of each allowed request.
-#   1) drop entries older than the window
-#   2) count survivors
-#   3) if under the limit -> record this request -> ALLOW
-# All three steps atomic. EXPIRE cleans up clients that go silent forever.
+# Lua script 2: sliding window (atomic). Returns {allowed, remaining, reset}.
 # ---------------------------------------------------------------------------
 SLIDING_WINDOW_LUA = """
 local key          = KEYS[1]
@@ -72,28 +72,41 @@ local window       = tonumber(ARGV[2])
 local t   = redis.call('TIME')
 local now = tonumber(t[1]) + tonumber(t[2]) / 1000000
 
-redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+-- slide: drop entries older than the window
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
 
-local count = redis.call('ZCARD', key)
+local count   = redis.call('ZCARD', key)
 local allowed = 0
 if count < max_requests then
-  -- member must be unique; a per-key counter guarantees it even if two
-  -- requests share the same microsecond timestamp
-  local seq = redis.call('INCR', key .. ':seq')
-  redis.call('ZADD', key, now, tostring(now) .. '-' .. tostring(seq))
   allowed = 1
+  redis.call('ZADD', key, now, tostring(now) .. '-' .. tostring(count))
   count = count + 1
 end
 
--- auto-delete state for clients that vanish (no memory leak)
-redis.call('EXPIRE', key, math.ceil(window) + 60)
-redis.call('EXPIRE', key .. ':seq', math.ceil(window) + 60)
+-- reset: when the OLDEST logged request ages out of the window
+local reset = 0
+if count >= max_requests then
+  local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+  if oldest[2] then
+    reset = math.max(0, tonumber(oldest[2]) + window - now)
+  end
+end
 
-return {allowed, max_requests - count}
+-- self-cleanup: idle clients' logs expire on their own
+redis.call('EXPIRE', key, math.ceil(window) + 1)
+
+local remaining = math.max(0, max_requests - count)
+return {allowed, tostring(remaining), tostring(reset)}
 """
 
 token_bucket_script = redis_client.register_script(TOKEN_BUCKET_LUA)
 sliding_window_script = redis_client.register_script(SLIDING_WINDOW_LUA)
+
+DEFAULT_MODE = "token_bucket"
+DEFAULT_RPS = 1.0
+DEFAULT_BURST = 5.0
+DEFAULT_MAX_REQUESTS = 10
+DEFAULT_WINDOW_SECONDS = 60.0
 
 
 # ---------- models ----------
@@ -103,31 +116,17 @@ class CheckRequest(BaseModel):
 
 
 class ConfigRequest(BaseModel):
-    """Admin config. Which fields are required depends on the mode."""
     client_key: str
-    mode: Literal["token_bucket", "sliding_window"] = "token_bucket"
-    # token_bucket fields
-    requests_per_second: Optional[float] = Field(default=None, gt=0)
-    burst_size: Optional[float] = Field(default=None, ge=1)
-    # sliding_window fields
-    max_requests: Optional[int] = Field(default=None, ge=1)
-    window_seconds: Optional[float] = Field(default=None, gt=0)
-
-    @model_validator(mode="after")
-    def check_fields_for_mode(self) -> "ConfigRequest":
-        """Reject configs missing the fields their mode needs."""
-        if self.mode == "token_bucket":
-            if self.requests_per_second is None or self.burst_size is None:
-                raise ValueError(
-                    "token_bucket mode requires requests_per_second and burst_size")
-        else:
-            if self.max_requests is None or self.window_seconds is None:
-                raise ValueError(
-                    "sliding_window mode requires max_requests and window_seconds")
-        return self
+    mode: Literal["token_bucket", "sliding_window"] = DEFAULT_MODE
+    # token bucket settings
+    requests_per_second: float = Field(default=DEFAULT_RPS, gt=0)
+    burst_size: float = Field(default=DEFAULT_BURST, ge=1)
+    # sliding window settings
+    max_requests: int = Field(default=DEFAULT_MAX_REQUESTS, ge=1)
+    window_seconds: float = Field(default=DEFAULT_WINDOW_SECONDS, gt=0)
 
 
-# ---------- redis key helpers ----------
+# ---------- redis keys ----------
 
 def bucket_key(client_key: str) -> str:
     return f"bucket:{client_key}"
@@ -141,17 +140,15 @@ def config_key(client_key: str) -> str:
     return f"config:{client_key}"
 
 
-# ---------- config load ----------
-
-DEFAULT_CONFIG = {"mode": "token_bucket",
-                  "requests_per_second": 1.0, "burst_size": 5.0}
-
-
 def load_config(client_key: str) -> dict:
     raw = redis_client.hgetall(config_key(client_key))
-    if not raw:
-        return DEFAULT_CONFIG
-    return raw  # values are strings; converted where used
+    return {
+        "mode": raw.get("mode", DEFAULT_MODE),
+        "requests_per_second": float(raw.get("requests_per_second", DEFAULT_RPS)),
+        "burst_size": float(raw.get("burst_size", DEFAULT_BURST)),
+        "max_requests": int(raw.get("max_requests", DEFAULT_MAX_REQUESTS)),
+        "window_seconds": float(raw.get("window_seconds", DEFAULT_WINDOW_SECONDS)),
+    }
 
 
 # ---------- endpoints ----------
@@ -159,19 +156,26 @@ def load_config(client_key: str) -> dict:
 @app.post("/check")
 def check_rate_limit(body: CheckRequest, response: Response) -> dict:
     cfg = load_config(body.client_key)
-    mode = cfg["mode"]
 
-    if mode == "token_bucket":
-        allowed, remaining = token_bucket_script(
-            keys=[bucket_key(body.client_key)],
-            args=[float(cfg["burst_size"]), float(cfg["requests_per_second"])],
-        )
-        remaining = round(float(remaining), 3)
-    else:  # sliding_window
-        allowed, remaining = sliding_window_script(
+    if cfg["mode"] == "sliding_window":
+        limit = cfg["max_requests"]
+        allowed, remaining, reset = sliding_window_script(
             keys=[window_key(body.client_key)],
-            args=[int(cfg["max_requests"]), float(cfg["window_seconds"])],
+            args=[cfg["max_requests"], cfg["window_seconds"]],
         )
+    else:
+        limit = cfg["burst_size"]
+        allowed, remaining, reset = token_bucket_script(
+            keys=[bucket_key(body.client_key)],
+            args=[cfg["burst_size"], cfg["requests_per_second"]],
+        )
+
+    # --- Req #6: standard headers on EVERY response (allow and deny) ---
+    # Headers are strings by spec. Remaining is floored (a client with 0.8
+    # tokens can't make a request, so advertising "0" is the honest value).
+    response.headers["X-RateLimit-Limit"] = str(int(limit))
+    response.headers["X-RateLimit-Remaining"] = str(int(float(remaining)))
+    response.headers["X-RateLimit-Reset"] = str(math.ceil(float(reset)))
 
     if not allowed:
         response.status_code = 429
@@ -179,36 +183,37 @@ def check_rate_limit(body: CheckRequest, response: Response) -> dict:
     return {
         "decision": "ALLOW" if allowed else "DENY",
         "client_key": body.client_key,
-        "mode": mode,
-        "remaining": remaining,
+        "mode": cfg["mode"],
+        "remaining": round(float(remaining), 3),
     }
 
 
 @app.post("/admin/config")
 def set_config(body: ConfigRequest) -> dict:
-    mapping = {"mode": body.mode}
-    if body.mode == "token_bucket":
-        mapping["requests_per_second"] = body.requests_per_second
-        mapping["burst_size"] = body.burst_size
-    else:
-        mapping["max_requests"] = body.max_requests
-        mapping["window_seconds"] = body.window_seconds
-
-    # Replace (not merge): delete leftovers from a previous mode first,
-    # and clear old live state so the client starts clean under new rules.
-    redis_client.delete(config_key(body.client_key),
-                        bucket_key(body.client_key),
-                        window_key(body.client_key))
-    redis_client.hset(config_key(body.client_key), mapping=mapping)
-    return {"message": f"config saved for '{body.client_key}'", **mapping}
+    redis_client.hset(
+        config_key(body.client_key),
+        mapping={
+            "mode": body.mode,
+            "requests_per_second": body.requests_per_second,
+            "burst_size": body.burst_size,
+            "max_requests": body.max_requests,
+            "window_seconds": body.window_seconds,
+        },
+    )
+    return {
+        "message": f"config saved for '{body.client_key}'",
+        "mode": body.mode,
+        "max_requests": body.max_requests,
+        "window_seconds": body.window_seconds,
+    }
 
 
 @app.get("/admin/config/{client_key}")
 def get_config(client_key: str) -> dict:
     cfg = load_config(client_key)
     is_custom = bool(redis_client.exists(config_key(client_key)))
-    return {"client_key": client_key,
-            "source": "custom" if is_custom else "default", **cfg}
+    return {"client_key": client_key, **cfg,
+            "source": "custom" if is_custom else "default"}
 
 
 @app.get("/health")
@@ -217,5 +222,4 @@ def health() -> dict:
         redis_ok = redis_client.ping()
     except redis.exceptions.ConnectionError:
         redis_ok = False
-    return {"status": "ok" if redis_ok else "degraded",
-            "redis_connected": redis_ok}
+    return {"status": "ok" if redis_ok else "degraded", "redis_connected": redis_ok}
