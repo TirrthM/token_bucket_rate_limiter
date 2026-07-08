@@ -22,8 +22,9 @@ CONCURRENCY = int(os.getenv("CONCURRENCY", "100"))
 CAPACITY = 50          # burst size for the test client
 REFILL = 100           # tokens/sec for the test client
 MINIMUM_RPS = 500      # Phase 7 acceptance threshold
+MINIMUM_INSTANCES = int(os.getenv("MINIMUM_INSTANCES", "3"))
 
-results: list[tuple[int, float]] = []   # (status_code, latency_seconds)
+results: list[tuple[int, float, str]] = []  # status, latency, API instance
 
 
 async def setup() -> None:
@@ -55,17 +56,22 @@ async def worker(host: str, port: int, deadline: float) -> None:
             raw_headers = await reader.readuntil(b"\r\n\r\n")
             header_lines = raw_headers.decode("latin-1").split("\r\n")
             status_code = int(header_lines[0].split()[1])
+            instance = next(
+                (line.split(":", 1)[1].strip() for line in header_lines[1:]
+                 if line.lower().startswith("x-ratelimiter-instance:")),
+                "unknown",
+            )
             content_length = next(
                 int(line.split(":", 1)[1])
                 for line in header_lines[1:]
                 if line.lower().startswith("content-length:")
             )
             await reader.readexactly(content_length)
-            results.append((status_code, time.perf_counter() - t0))
+            results.append((status_code, time.perf_counter() - t0, instance))
         writer.close()
         await writer.wait_closed()
     except (OSError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
-        results.append((0, 0.0))
+        results.append((0, 0.0, "connection-error"))
 
 
 async def main() -> None:
@@ -83,11 +89,13 @@ async def main() -> None:
 
     elapsed = time.perf_counter() - start
     total = len(results)
-    allowed = sum(1 for s, _ in results if s == 200)
-    denied = sum(1 for s, _ in results if s == 429)
+    allowed = sum(1 for s, _, _ in results if s == 200)
+    denied = sum(1 for s, _, _ in results if s == 429)
     errors = total - allowed - denied
 
-    lat = sorted(l for _, l in results)
+    lat = sorted(l for _, l, _ in results)
+    instances = sorted({instance for status, _, instance in results
+                        if status in (200, 429) and instance != "unknown"})
     p50 = lat[int(0.50 * len(lat))] * 1000
     p95 = lat[int(0.95 * len(lat))] * 1000
     p99 = lat[int(0.99 * len(lat))] * 1000
@@ -103,6 +111,7 @@ async def main() -> None:
     print(f"ALLOWED:       {allowed}")
     print(f"DENIED:        {denied}")
     print(f"errors:        {errors}")
+    print(f"API instances: {', '.join(instances) or 'none'}")
     print(f"latency ms:    p50={p50:.1f}  p95={p95:.1f}  p99={p99:.1f}")
     print(f"ceiling:       {ceiling} (= floor({CAPACITY} burst "
           f"+ {REFILL}/s x {elapsed:.2f}s))")
@@ -111,6 +120,8 @@ async def main() -> None:
         "500+ requests/sec": throughput >= MINIMUM_RPS,
         "no request errors": errors == 0,
         "no token over-allocation": allowed <= ceiling,
+        f"traffic reached {MINIMUM_INSTANCES}+ API instances":
+            len(instances) >= MINIMUM_INSTANCES,
     }
     for name, passed in checks.items():
         print(f"{'PASS' if passed else 'FAIL'}: {name}")

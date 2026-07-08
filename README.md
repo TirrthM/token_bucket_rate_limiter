@@ -12,14 +12,14 @@ Calling service
       |
       | POST /check {client_key}
       v
-FastAPI rate-limiter (4 workers)
+Nginx load balancer :8000
       |
-      | one atomic Lua evaluation
-      v
-Redis (config + bucket/window state, AOF persistence)
-      |
-      v
-ALLOW (200) or DENY (429) + rate-limit headers
+      +------ API instance 1 ----+
+      +------ API instance 2 ----+---- Redis
+      +------ API instance 3 ----+     (shared config, state, metrics)
+                                         |
+                                         v
+                         ALLOW (200) or DENY (429)
 ```
 
 ## Features
@@ -31,6 +31,9 @@ ALLOW (200) or DENY (429) + rate-limit headers
 - Atomic decisions under concurrency using Redis Lua
 - `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`
 - Reproducible 500+ RPS correctness test
+- Three independently running API instances behind Nginx
+- Shared limits that remain correct regardless of which instance handles a request
+- Live dashboard with per-client totals, denial rate, RPS, and instance distribution
 
 ## Run locally
 
@@ -40,8 +43,10 @@ Requirements: Docker with Docker Compose and Python 3.11+.
 docker compose up --build -d
 ```
 
-The API is available at `http://localhost:8000`; interactive OpenAPI docs are
-at `http://localhost:8000/docs`.
+Nginx is available at `http://localhost:8000` and distributes traffic across
+three API containers. Interactive OpenAPI docs are at
+`http://localhost:8000/docs`, and the dashboard is at
+`http://localhost:8000/dashboard`.
 
 ```bash
 curl http://localhost:8000/health
@@ -99,15 +104,15 @@ burst capacity of 5.
 Run deterministic unit tests inside the application image:
 
 ```bash
-docker compose exec api python -m pytest -q
+docker compose exec api1 python -m pytest -q
 ```
 
 Run the Phase 7 load test from a dedicated container on the Compose network:
 
 ```bash
 docker compose run --rm \
-  -e BASE_URL=http://api:8000 \
-  api python scripts/load_test.py
+  -e BASE_URL=http://nginx \
+  api1 python scripts/load_test.py
 ```
 
 Optional environment variables `CONCURRENCY` and `DURATION_SECONDS` override
@@ -151,6 +156,104 @@ while processing well above 500 RPS, with no observed token double-spend.
 Performance figures are local measurements, not universal capacity claims;
 hardware and container runtime affect the result.
 
+## Phase 8: distributed mode and dashboard
+
+### What changed
+
+- Nginx is now the only public entry point and balances requests across
+  `api-1`, `api-2`, and `api-3` using least-connections scheduling.
+- Every API instance uses the same Redis configuration and limiter state.
+- Responses include `X-RateLimiter-Instance`, making routing observable.
+- The atomic Lua operation now records total, allowed, denied, mode, last-seen,
+  and per-instance counts alongside each limiter decision.
+- `/admin/metrics` lists recently active clients.
+- `/admin/metrics/{client_key}` returns one client's cumulative metrics.
+- `/dashboard` polls those metrics every second and calculates live RPS from
+  changes between samples.
+
+Metrics are deliberately updated inside the same Lua operation as the decision.
+If they were incremented afterward in Python, a crash between the two writes
+could produce an ALLOW or DENY that the dashboard never counted.
+
+### Verify Phase 8 step by step
+
+Open Docker Desktop and wait until its engine is running. Then open a PowerShell
+terminal in this project and run:
+
+```powershell
+cd D:\token_bucket_rate_limiter
+docker compose up --build -d
+docker compose ps
+```
+
+You should see five running containers: `api1`, `api2`, `api3`, `nginx`, and
+`redis`. Redis should say `healthy` and Nginx should publish port `8000`.
+
+Confirm that Nginx reaches all three API instances:
+
+```powershell
+1..9 | ForEach-Object { (Invoke-RestMethod http://localhost:8000/health).instance }
+```
+
+The output should contain `api-1`, `api-2`, and `api-3`.
+
+Run all unit tests:
+
+```powershell
+docker compose exec api1 python -m pytest -q
+```
+
+Run the distributed correctness test:
+
+```powershell
+docker compose run --rm -e BASE_URL=http://nginx api1 python scripts/load_test.py
+```
+
+It must finish with these four lines:
+
+```text
+PASS: 500+ requests/sec
+PASS: no request errors
+PASS: no token over-allocation
+PASS: traffic reached 3+ API instances
+```
+
+Open `http://localhost:8000/dashboard` in a browser. Select the newest `load_...`
+client. You should see its total ALLOW/DENY counts and a table containing all
+three API instances. To watch the RPS card change live, keep the dashboard open
+and run the distributed test again in a second PowerShell terminal.
+
+### Measured distributed result (2026-07-09)
+
+| Metric | Result |
+|---|---:|
+| API instances reached | 3 |
+| Duration | 10.01 s |
+| Concurrent connections | 100 |
+| Completed requests | 101,185 |
+| Throughput | 10,111 RPS |
+| ALLOW | 1,044 |
+| DENY | 100,141 |
+| Request errors | 0 |
+| p50 / p95 / p99 latency | 9.1 / 14.8 / 27.0 ms |
+| Strict ALLOW upper bound | 1,050 |
+
+Result: **PASS**. All three instances handled traffic while collectively
+remaining below one shared mathematical allowance ceiling.
+
+### Commit Phase 8
+
+After verifying all four PASS lines:
+
+```powershell
+git add README.md app/main.py app/static/dashboard.html docker-compose.yml nginx/nginx.conf scripts/load_test.py tests/test_metrics.py
+git commit -m "Phase 8: distributed replicas and live metrics dashboard"
+git push origin main
+git status
+```
+
+The final `git status` should say `nothing to commit, working tree clean`.
+
 ## Design decisions
 
 - **Redis server time:** every worker uses the same clock, avoiding application
@@ -163,10 +266,14 @@ hardware and container runtime affect the result.
   restarts. Durability depends on Redis's configured fsync policy.
 - **Fresh load-test key:** each run begins with a known full bucket and cannot be
   contaminated by state from an earlier run.
+- **Stateless API replicas:** no limiter state is stored in a FastAPI process,
+  so Nginx can send consecutive requests to different instances safely.
+- **Observable routing:** an instance response header and Redis counters prove
+  traffic reached multiple replicas instead of merely showing that they started.
 
 ## Resume bullet
 
-Built a containerized FastAPI/Redis rate-limiter supporting per-client token
-bucket and sliding-window policies; used atomic Lua scripts to prevent token
-double-spend and validated 9.6K RPS at 100 concurrent connections with zero
-request errors and no over-allocation in a 96K-request correctness test.
+Built a distributed FastAPI/Redis rate-limiter with per-client token-bucket and
+sliding-window policies, three Nginx-balanced API replicas, atomic Lua decisions,
+and a live metrics dashboard; validated 10.1K RPS across all replicas with zero
+errors and no token over-allocation in a 101K-request correctness test.

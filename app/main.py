@@ -11,15 +11,18 @@ Logic/algorithms are unchanged from Phase 6.
 
 import math
 import os
+import socket
 from typing import Literal
 
 import redis.asyncio as redis          # CHANGED: async Redis client
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Query, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 app = FastAPI(title="Token Bucket Rate Limiter")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+INSTANCE_ID = os.getenv("INSTANCE_ID", socket.gethostname())
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)   # async pool
 
 TOKEN_BUCKET_LUA = """
@@ -106,6 +109,8 @@ RATE_LIMIT_LUA = """
 local config_key = KEYS[1]
 local bucket_key = KEYS[2]
 local window_key = KEYS[3]
+local metrics_key = KEYS[4]
+local clients_key = KEYS[5]
 
 local config = redis.call(
   'HMGET', config_key, 'mode', 'requests_per_second', 'burst_size',
@@ -138,6 +143,11 @@ if mode == 'sliding_window' then
   end
 
   redis.call('EXPIRE', window_key, math.ceil(window) + 1)
+  redis.call('HINCRBY', metrics_key, 'total', 1)
+  redis.call('HINCRBY', metrics_key, allowed == 1 and 'allowed' or 'denied', 1)
+  redis.call('HINCRBY', metrics_key, 'instance:' .. ARGV[7], 1)
+  redis.call('HSET', metrics_key, 'mode', mode, 'last_seen', tostring(now))
+  redis.call('ZADD', clients_key, now, ARGV[6])
   return {
     allowed, tostring(math.max(0, max_requests - count)),
     tostring(reset), tostring(max_requests), mode
@@ -167,6 +177,11 @@ local reset = 0
 if tokens < 1 then
   reset = (1 - tokens) / refill_rate
 end
+redis.call('HINCRBY', metrics_key, 'total', 1)
+redis.call('HINCRBY', metrics_key, allowed == 1 and 'allowed' or 'denied', 1)
+redis.call('HINCRBY', metrics_key, 'instance:' .. ARGV[7], 1)
+redis.call('HSET', metrics_key, 'mode', mode, 'last_seen', tostring(now))
+redis.call('ZADD', clients_key, now, ARGV[6])
 return {allowed, tostring(tokens), tostring(reset), tostring(capacity), mode}
 """
 
@@ -198,6 +213,10 @@ def config_key(client_key: str) -> str:
     return f"config:{client_key}"
 
 
+def metrics_key(client_key: str) -> str:
+    return f"metrics:client:{client_key}"
+
+
 async def load_config(client_key: str) -> dict:          # CHANGED: async + await
     raw = await redis_client.hgetall(config_key(client_key))
     return {
@@ -216,6 +235,8 @@ async def check_rate_limit(body: CheckRequest, response: Response) -> dict:  # a
             config_key(body.client_key),
             bucket_key(body.client_key),
             window_key(body.client_key),
+            metrics_key(body.client_key),
+            "metrics:index",
         ],
         args=[
             DEFAULT_MODE,
@@ -223,12 +244,15 @@ async def check_rate_limit(body: CheckRequest, response: Response) -> dict:  # a
             DEFAULT_BURST,
             DEFAULT_MAX_REQUESTS,
             DEFAULT_WINDOW_SECONDS,
+            body.client_key,
+            INSTANCE_ID,
         ],
     )
 
     response.headers["X-RateLimit-Limit"] = str(int(limit))
     response.headers["X-RateLimit-Remaining"] = str(int(float(remaining)))
     response.headers["X-RateLimit-Reset"] = str(math.ceil(float(reset)))
+    response.headers["X-RateLimiter-Instance"] = INSTANCE_ID
 
     if not allowed:
         response.status_code = 429
@@ -238,6 +262,7 @@ async def check_rate_limit(body: CheckRequest, response: Response) -> dict:  # a
         "client_key": body.client_key,
         "mode": mode,
         "remaining": round(float(remaining), 3),
+        "instance": INSTANCE_ID,
     }
 
 
@@ -275,4 +300,56 @@ async def health() -> dict:                              # async + await
         redis_ok = await redis_client.ping()
     except redis.ConnectionError:
         redis_ok = False
-    return {"status": "ok" if redis_ok else "degraded", "redis_connected": redis_ok}
+    return {
+        "status": "ok" if redis_ok else "degraded",
+        "redis_connected": redis_ok,
+        "instance": INSTANCE_ID,
+    }
+
+
+def format_metrics(client_key: str, raw: dict[str, str]) -> dict:
+    instances = {
+        key.removeprefix("instance:"): int(value)
+        for key, value in raw.items()
+        if key.startswith("instance:")
+    }
+    total = int(raw.get("total", 0))
+    denied = int(raw.get("denied", 0))
+    return {
+        "client_key": client_key,
+        "mode": raw.get("mode"),
+        "total": total,
+        "allowed": int(raw.get("allowed", 0)),
+        "denied": denied,
+        "denial_rate": round(denied / total, 4) if total else 0.0,
+        "last_seen": float(raw["last_seen"]) if raw.get("last_seen") else None,
+        "instances": instances,
+    }
+
+
+@app.get("/admin/metrics/{client_key}")
+async def get_client_metrics(client_key: str) -> dict:
+    raw = await redis_client.hgetall(metrics_key(client_key))
+    return format_metrics(client_key, raw)
+
+
+@app.get("/admin/metrics")
+async def get_recent_metrics(limit: int = Query(default=20, ge=1, le=100)) -> dict:
+    client_keys = await redis_client.zrevrange("metrics:index", 0, limit - 1)
+    if not client_keys:
+        return {"clients": []}
+    pipeline = redis_client.pipeline(transaction=False)
+    for client_key in client_keys:
+        pipeline.hgetall(metrics_key(client_key))
+    rows = await pipeline.execute()
+    return {
+        "clients": [
+            format_metrics(client_key, raw)
+            for client_key, raw in zip(client_keys, rows, strict=True)
+        ]
+    }
+
+
+@app.get("/dashboard", include_in_schema=False)
+async def dashboard() -> FileResponse:
+    return FileResponse("app/static/dashboard.html")

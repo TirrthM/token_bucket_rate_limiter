@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rate Limiter Dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+      --bg: #07101f; --panel: #0e1b2f; --panel-2: #12223a;
+      --border: #213957; --text: #edf4ff; --muted: #91a7c2;
+      --blue: #5b8cff; --green: #43d19e; --red: #ff6b81; --amber: #f6c760;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: var(--text); background:
+      radial-gradient(circle at 80% -10%, #17335f 0, transparent 32%), var(--bg); }
+    main { width: min(1180px, calc(100% - 40px)); margin: auto; padding: 36px 0 54px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+    .brand { display: flex; align-items: center; gap: 13px; }
+    .logo { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 13px;
+      background: linear-gradient(145deg, #4f7df1, #795cf5); font-weight: 900; box-shadow: 0 10px 35px #315ed744; }
+    h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2.15rem); letter-spacing: -.035em; }
+    .subtitle, .muted { color: var(--muted); }
+    .subtitle { margin-top: 4px; font-size: .94rem; }
+    .system-pill, .activity { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border);
+      border-radius: 999px; padding: 8px 12px; background: #0c192bba; color: #bdd0e8; font-size: .84rem; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px var(--green); }
+    .control { display: grid; grid-template-columns: 1fr auto; gap: 14px; margin: 30px 0 20px;
+      padding: 18px; border: 1px solid var(--border); border-radius: 16px; background: #0b182aaf; }
+    .field label { display: block; margin-bottom: 8px; color: var(--muted); font-size: .76rem;
+      font-weight: 700; letter-spacing: .09em; text-transform: uppercase; }
+    select, button { min-height: 44px; border: 1px solid #2b4669; border-radius: 10px; color: #fff;
+      background: var(--panel-2); padding: 10px 14px; font: inherit; outline: none; }
+    select { width: 100%; } select:focus, button:focus { border-color: var(--blue); box-shadow: 0 0 0 3px #5b8cff22; }
+    button { align-self: end; cursor: pointer; border-color: #537fe5; background: linear-gradient(135deg, #4f7df1, #6d5ce7);
+      font-weight: 700; transition: transform .15s, filter .15s; }
+    button:hover { transform: translateY(-1px); filter: brightness(1.08); }
+    .meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 2px 18px; }
+    .activity.idle .dot { background: var(--amber); box-shadow: 0 0 12px var(--amber); }
+    .activity.error .dot { background: var(--red); box-shadow: 0 0 12px var(--red); }
+    #error { color: var(--red); font-size: .9rem; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+    .card { min-width: 0; padding: 20px; border: 1px solid var(--border); border-radius: 15px;
+      background: linear-gradient(145deg, #101f35, #0d192b); box-shadow: 0 14px 35px #02071333; }
+    .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .label { color: var(--muted); font-size: .75rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+    .icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: #5b8cff18;
+      color: #8bacff; font-size: .8rem; font-weight: 800; }
+    .value { overflow: hidden; margin-top: 13px; font-size: clamp(1.65rem, 3vw, 2.25rem); font-weight: 780;
+      letter-spacing: -.04em; text-overflow: ellipsis; white-space: nowrap; }
+    .value.policy { font-size: 1.55rem; text-transform: capitalize; }
+    .hint { margin-top: 6px; color: #7087a3; font-size: .78rem; }
+    .ok { color: var(--green); } .deny { color: var(--red); }
+    .section { margin-top: 25px; padding: 22px; border: 1px solid var(--border); border-radius: 16px; background: #0d1a2c; }
+    .section-title { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-bottom: 20px; }
+    h2 { margin: 0; font-size: 1.05rem; } .section-title p { margin: 4px 0 0; font-size: .83rem; color: var(--muted); }
+    .instances { display: grid; gap: 15px; }
+    .instance-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 7px; font-size: .88rem; }
+    .instance-name { font-weight: 700; } .instance-count { color: var(--muted); }
+    .track { height: 9px; overflow: hidden; border-radius: 999px; background: #07111f; }
+    .bar { height: 100%; min-width: 2px; border-radius: inherit; background: linear-gradient(90deg, #4e83f6, #7b66ed);
+      transition: width .5s ease; }
+    footer { display: flex; justify-content: center; margin-top: 24px; color: #6f859f; font-size: .78rem; }
+    @media (max-width: 760px) {
+      main { width: min(100% - 24px, 1180px); padding-top: 22px; }
+      .topbar { align-items: flex-start; } .system-pill { display: none; }
+      .control { grid-template-columns: 1fr; } button { width: 100%; }
+      .grid { grid-template-columns: repeat(2, 1fr); }
+      .meta { align-items: flex-start; flex-direction: column; }
+    }
+    @media (max-width: 430px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">RL</div>
+      <div><h1>Rate Limiter Control Plane</h1><div class="subtitle">Distributed traffic and policy telemetry</div></div>
+    </div>
+    <div class="system-pill"><span class="dot"></span>3 API replicas connected</div>
+  </header>
+  <section class="control">
+    <div class="field"><label for="client">Observed client</label>
+      <select id="client"><option value="">Waiting for traffic...</option></select></div>
+    <button id="refresh" type="button">Refresh metrics</button>
+  </section>
+  <div class="meta">
+    <div class="activity idle" id="activity"><span class="dot"></span><span id="activityText">Waiting for traffic</span></div>
+    <div><span id="error"></span><span class="muted" id="updated">Not updated yet</span></div>
+  </div>
+  <section class="grid">
+    <div class="card"><div class="card-head"><div class="label">Current throughput</div><div class="icon">RPS</div></div><div class="value" id="rps">0</div><div class="hint">Requests in the last refresh interval</div></div>
+    <div class="card"><div class="card-head"><div class="label">Total decisions</div><div class="icon">#</div></div><div class="value" id="total">0</div><div class="hint">All recorded checks for this client</div></div>
+    <div class="card"><div class="card-head"><div class="label">Allowed</div><div class="icon">OK</div></div><div class="value ok" id="allowed">0</div><div class="hint">Requests admitted by the limiter</div></div>
+    <div class="card"><div class="card-head"><div class="label">Denied</div><div class="icon">429</div></div><div class="value deny" id="denied">0</div><div class="hint">Requests rejected at the limit</div></div>
+    <div class="card"><div class="card-head"><div class="label">Denial rate</div><div class="icon">%</div></div><div class="value" id="denialRate">0%</div><div class="hint">Denied decisions / total decisions</div></div>
+    <div class="card"><div class="card-head"><div class="label">Active policy</div><div class="icon">CFG</div></div><div class="value policy" id="mode">-</div><div class="hint">Configured per client in Redis</div></div>
+  </section>
+  <section class="section">
+    <div class="section-title"><div><h2>Traffic distribution</h2><p>How Nginx divided this client's requests across stateless API replicas</p></div><span class="muted" id="instanceCount">0 instances</span></div>
+    <div class="instances" id="instances"><div class="muted">No traffic recorded yet.</div></div>
+  </section>
+  <footer>Nginx load balancer&nbsp; -> &nbsp;3 FastAPI replicas&nbsp; -> &nbsp;shared Redis state</footer>
+</main>
+<script>
+  const clientSelect = document.querySelector('#client');
+  let previousTotal = null;
+  let previousTime = null;
+
+  const number = value => value.toLocaleString('en-US');
+  const friendlyPolicy = value => value ? value.replaceAll('_', ' ') : '-';
+
+  async function loadClients() {
+    const response = await fetch('/admin/metrics');
+    if (!response.ok) throw new Error(`Metrics request failed: ${response.status}`);
+    const {clients} = await response.json();
+    const selected = clientSelect.value;
+    clientSelect.replaceChildren();
+    const entries = clients.length ? clients : [{client_key: '', empty: true}];
+    for (const client of entries) {
+      const option = document.createElement('option');
+      option.value = client.client_key;
+      option.textContent = client.empty ? 'Waiting for traffic...' : client.client_key;
+      clientSelect.appendChild(option);
+    }
+    if (clients.some(c => c.client_key === selected)) clientSelect.value = selected;
+  }
+
+  async function refresh() {
+    try {
+      await loadClients();
+      const key = clientSelect.value;
+      if (!key) return;
+      const response = await fetch(`/admin/metrics/${encodeURIComponent(key)}`);
+      if (!response.ok) throw new Error(`Client metrics failed: ${response.status}`);
+      const data = await response.json();
+      const now = performance.now();
+      const rps = previousTotal === null ? 0 : (data.total - previousTotal) / ((now - previousTime) / 1000);
+      previousTotal = data.total; previousTime = now;
+      const roundedRps = Math.max(0, rps).toFixed(0);
+      document.querySelector('#rps').textContent = number(Number(roundedRps));
+      document.querySelector('#total').textContent = number(data.total);
+      document.querySelector('#allowed').textContent = number(data.allowed);
+      document.querySelector('#denied').textContent = number(data.denied);
+      document.querySelector('#denialRate').textContent = `${(data.denial_rate * 100).toFixed(1)}%`;
+      document.querySelector('#mode').textContent = friendlyPolicy(data.mode);
+      const activity = document.querySelector('#activity');
+      const isLive = Number(roundedRps) > 0;
+      activity.className = `activity ${isLive ? '' : 'idle'}`;
+      document.querySelector('#activityText').textContent = isLive
+        ? `Live traffic: ${number(Number(roundedRps))} requests/s`
+        : 'Idle: run the load test to see live throughput';
+      document.querySelector('#updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      const rows = Object.entries(data.instances);
+      const instanceList = document.querySelector('#instances');
+      instanceList.replaceChildren();
+      document.querySelector('#instanceCount').textContent = `${rows.length} instance${rows.length === 1 ? '' : 's'}`;
+      if (!rows.length) {
+        const empty = document.createElement('div'); empty.className = 'muted'; empty.textContent = 'No traffic recorded yet.';
+        instanceList.appendChild(empty);
+      }
+      for (const [name, count] of rows.sort((a, b) => a[0].localeCompare(b[0]))) {
+        const share = data.total ? count / data.total * 100 : 0;
+        const item = document.createElement('div'); item.className = 'instance';
+        const head = document.createElement('div'); head.className = 'instance-head';
+        const label = document.createElement('span'); label.className = 'instance-name'; label.textContent = name;
+        const value = document.createElement('span'); value.className = 'instance-count';
+        value.textContent = `${number(count)} requests (${share.toFixed(1)}%)`;
+        head.append(label, value);
+        const track = document.createElement('div'); track.className = 'track';
+        const bar = document.createElement('div'); bar.className = 'bar'; bar.style.width = `${share}%`;
+        track.appendChild(bar); item.append(head, track); instanceList.appendChild(item);
+      }
+      document.querySelector('#error').textContent = '';
+    } catch (error) {
+      const activity = document.querySelector('#activity'); activity.className = 'activity error';
+      document.querySelector('#activityText').textContent = 'Metrics unavailable';
+      document.querySelector('#error').textContent = error.message;
+    }
+  }
+  clientSelect.addEventListener('change', () => { previousTotal = null; refresh(); });
+  document.querySelector('#refresh').addEventListener('click', refresh);
+  refresh(); setInterval(refresh, 1000);
+</script>
+</body>
+</html>
