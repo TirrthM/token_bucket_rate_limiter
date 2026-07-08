@@ -8,9 +8,9 @@ services:
     depends_on:
       - redis
     volumes:
-      - .:/app                    # your live folder replaces the baked-in copy
+      - .:/app                    # local changes are visible inside the container
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0",
-              "--port", "8000", "--reload"]   # auto-restart on code change
+              "--port", "8000", "--no-access-log", "--workers", "4"]
 
   redis:
     image: redis:7-alpine
