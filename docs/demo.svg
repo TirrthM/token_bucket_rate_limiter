@@ -1,0 +1,28 @@
+<svg width="1200" height="640" viewBox="0 0 1200 640" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="640" rx="28" fill="#0f172a"/>
+  <rect x="60" y="80" width="1080" height="480" rx="24" fill="#111827" stroke="#334155" stroke-width="2"/>
+  <text x="80" y="140" fill="#f8fafc" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="700">Token Bucket Rate Limiter</text>
+  <text x="80" y="182" fill="#94a3b8" font-family="Segoe UI, Arial, sans-serif" font-size="18">Distributed FastAPI + Redis + Nginx demo preview</text>
+
+  <rect x="110" y="230" width="220" height="90" rx="16" fill="#2563eb"/>
+  <text x="150" y="276" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="600">Client</text>
+
+  <rect x="420" y="230" width="220" height="90" rx="16" fill="#0ea5e9"/>
+  <text x="470" y="276" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="600">Nginx</text>
+
+  <rect x="730" y="230" width="220" height="90" rx="16" fill="#16a34a"/>
+  <text x="780" y="276" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="600">API replicas</text>
+
+  <rect x="730" y="380" width="220" height="90" rx="16" fill="#f59e0b"/>
+  <text x="790" y="426" fill="#ffffff" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="600">Redis</text>
+
+  <path d="M330 275 L420 275" stroke="#38bdf8" stroke-width="4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M640 275 L730 275" stroke="#38bdf8" stroke-width="4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M840 320 L840 380" stroke="#fbbf24" stroke-width="4" fill="none" marker-end="url(#arrow)"/>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#38bdf8"/>
+    </marker>
+  </defs>
+</svg>

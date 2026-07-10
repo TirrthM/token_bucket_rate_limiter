@@ -47,6 +47,10 @@ Client / upstream service
 - Dashboard and metrics endpoints for observability
 - Distributed deployment behind Nginx with multiple API replicas
 
+## Demo preview
+
+A lightweight architecture preview is included in [docs/demo.svg](docs/demo.svg) so the project is easier to browse in GitHub.
+
 ## Quick start
 
 ### Prerequisites
@@ -208,4 +212,11 @@ Delete all persisted data if you want a fresh start:
 docker compose down -v
 ```
 
+## Release notes
+
+A release summary is available in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+
+## Resume-ready summary
+
+Built a distributed FastAPI/Redis rate-limiter with per-client token-bucket and sliding-window policies, three Nginx-balanced API replicas, atomic Lua decisions, and a live metrics dashboard; validated 500+ RPS with zero errors and no token over-allocation in a distributed correctness test.
 
