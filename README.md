@@ -49,7 +49,9 @@ Client / upstream service
 
 ## Demo preview
 
-A lightweight architecture preview is included in [docs/demo.svg](docs/demo.svg) so the project is easier to browse in GitHub.
+A lightweight architecture preview is included in [docs/demo.svg](docs/demo.svg), and a live dashboard screenshot is included in [docs/dashboard-screenshot.png](docs/dashboard-screenshot.png).
+
+![Dashboard screenshot](docs/dashboard-screenshot.png)
 
 ## Quick start
 
