@@ -12,9 +12,9 @@ Logic/algorithms are unchanged from Phase 6.
 import math
 import os
 import socket
-from typing import Literal
+from typing import Any, Literal
 
-import redis.asyncio as redis          # CHANGED: async Redis client
+import redis.asyncio as redis
 from fastapi import FastAPI, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -217,7 +217,7 @@ def metrics_key(client_key: str) -> str:
     return f"metrics:client:{client_key}"
 
 
-async def load_config(client_key: str) -> dict:          # CHANGED: async + await
+async def load_config(client_key: str) -> dict[str, float | int | str]:
     raw = await redis_client.hgetall(config_key(client_key))
     return {
         "mode": raw.get("mode", DEFAULT_MODE),
@@ -229,7 +229,7 @@ async def load_config(client_key: str) -> dict:          # CHANGED: async + awai
 
 
 @app.post("/check")
-async def check_rate_limit(body: CheckRequest, response: Response) -> dict:  # async
+async def check_rate_limit(body: CheckRequest, response: Response) -> dict[str, Any]:
     allowed, remaining, reset, limit, mode = await rate_limit_script(
         keys=[
             config_key(body.client_key),
@@ -267,7 +267,7 @@ async def check_rate_limit(body: CheckRequest, response: Response) -> dict:  # a
 
 
 @app.post("/admin/config")
-async def set_config(body: ConfigRequest) -> dict:       # async + await
+async def set_config(body: ConfigRequest) -> dict[str, Any]:
     await redis_client.hset(
         config_key(body.client_key),
         mapping={
@@ -287,7 +287,7 @@ async def set_config(body: ConfigRequest) -> dict:       # async + await
 
 
 @app.get("/admin/config/{client_key}")
-async def get_config(client_key: str) -> dict:           # async + await
+async def get_config(client_key: str) -> dict[str, Any]:
     cfg = await load_config(client_key)
     is_custom = bool(await redis_client.exists(config_key(client_key)))
     return {"client_key": client_key, **cfg,
@@ -295,7 +295,7 @@ async def get_config(client_key: str) -> dict:           # async + await
 
 
 @app.get("/health")
-async def health() -> dict:                              # async + await
+async def health() -> dict[str, Any]:
     try:
         redis_ok = await redis_client.ping()
     except redis.ConnectionError:
@@ -307,7 +307,7 @@ async def health() -> dict:                              # async + await
     }
 
 
-def format_metrics(client_key: str, raw: dict[str, str]) -> dict:
+def format_metrics(client_key: str, raw: dict[str, str]) -> dict[str, Any]:
     instances = {
         key.removeprefix("instance:"): int(value)
         for key, value in raw.items()
@@ -328,13 +328,13 @@ def format_metrics(client_key: str, raw: dict[str, str]) -> dict:
 
 
 @app.get("/admin/metrics/{client_key}")
-async def get_client_metrics(client_key: str) -> dict:
+async def get_client_metrics(client_key: str) -> dict[str, Any]:
     raw = await redis_client.hgetall(metrics_key(client_key))
     return format_metrics(client_key, raw)
 
 
 @app.get("/admin/metrics")
-async def get_recent_metrics(limit: int = Query(default=20, ge=1, le=100)) -> dict:
+async def get_recent_metrics(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
     client_keys = await redis_client.zrevrange("metrics:index", 0, limit - 1)
     if not client_keys:
         return {"clients": []}

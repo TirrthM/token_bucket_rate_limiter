@@ -7,6 +7,11 @@ x-api-common: &api-common
     - .:/app
   command: ["uvicorn", "app.main:app", "--host", "0.0.0.0",
             "--port", "8000", "--no-access-log"]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=1)"]
+    interval: 2s
+    timeout: 2s
+    retries: 10
 
 services:
   api1:
@@ -34,9 +39,12 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - api1
-      - api2
-      - api3
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
+      api3:
+        condition: service_healthy
 
   redis:
     image: redis:7-alpine
