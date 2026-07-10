@@ -216,7 +216,5 @@ docker compose down -v
 
 A release summary is available in [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
-## Resume-ready summary
 
-Built a distributed FastAPI/Redis rate-limiter with per-client token-bucket and sliding-window policies, three Nginx-balanced API replicas, atomic Lua decisions, and a live metrics dashboard; validated 500+ RPS with zero errors and no token over-allocation in a distributed correctness test.
 
