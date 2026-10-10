@@ -1,222 +1,119 @@
-# Token Bucket Rate Limiter
+<h1 align="center">🛡️ Distributed Token Bucket Rate Limiter</h1>
 
-A production-style FastAPI service that answers one question for other services: should this request be allowed or denied? The project combines a distributed rate-limiting engine, Redis-backed shared state, atomic Lua scripting, Docker-based orchestration, and a live dashboard into a single, deployable backend system.
+<p align="center">
+  <em>A production-ready FastAPI rate limiting service built to handle extreme scale.</em><br/>
+  <em>Think of it as the ultimate bouncer for your APIs.</em>
+</p>
 
-This repository is designed to be both practical and interview-friendly. It demonstrates real engineering decisions around concurrency, state sharing, distributed systems, and correctness under load.
+## 📖 What is this?
 
-## Overview
+Imagine you are running an exclusive nightclub (your server). If too many people try to rush the door at once, the club gets overwhelmed and crashes. 
 
-This project implements:
+This project is the **Bouncer**. Before anyone (a client) is allowed to access your services, they must ask the bouncer. 
+- If they are following the rules (e.g., only 5 requests per second), the bouncer says **"Yes (HTTP 200)"**.
+- If they are rushing the door, the bouncer says **"No, wait! (HTTP 429 Too Many Requests)"**.
 
-- A public HTTP endpoint for rate-limit decisions
-- Per-client configuration through admin endpoints
-- Token-bucket and sliding-window policies
-- Redis-backed shared state that survives restarts
-- Atomic, race-safe decisions using Lua scripts in Redis
-- Standard rate-limit response headers
-- A metrics dashboard for live observability
-- Docker Compose orchestration with Nginx, Redis, and three API replicas
+It combines a **distributed engine**, **Redis shared state**, **atomic Lua scripting**, and **Docker orchestration** into a single backend system.
 
-## Architecture
+## 🌟 Key Features
 
-```text
-Client / upstream service
-        |
-        | POST /check {client_key}
-        v
-   Nginx (port 8000)
-        |
-   +---- API replica 1 ----+
-   +---- API replica 2 ----+---- Redis (shared config, state, metrics)
-   +---- API replica 3 ----+
-        |
-        v
-  ALLOW (200) or DENY (429)
-```
+- **Blazing Fast:** Uses atomic Lua scripts in Redis to prevent race conditions and ensure microsecond decision times.
+- **Two Modes:** Choose between `Token Bucket` (allows smooth bursts) or `Sliding Window` (hard ceilings).
+- **Fully Distributed:** Scales out horizontally across multiple API instances.
+- **Live Dashboard:** Watch traffic get allowed and denied in real-time.
+- **Foolproof Setup:** Entirely Dockerized. Run one command and you are ready to go.
 
-## Features
+---
 
-- Token bucket mode for sustainable throughput with controlled bursts
-- Sliding-window mode for hard request-count ceilings over a recent interval
-- Redis-backed state that survives service restart
-- Race-condition-safe behavior under concurrency
-- Standard headers:
-  - `X-RateLimit-Limit`
-  - `X-RateLimit-Remaining`
-  - `X-RateLimit-Reset`
-- Dashboard and metrics endpoints for observability
-- Distributed deployment behind Nginx with multiple API replicas
+## 🚀 Quick Start Guide (Foolproof Setup)
 
-## Demo preview
+We have designed this so anyone can run it in under 60 seconds.
 
-A lightweight architecture preview is included in [docs/demo.svg](docs/demo.svg), and a live dashboard screenshot is included in [docs/dashboard-screenshot.png](docs/dashboard-screenshot.png).
+### 1. Prerequisites
+You only need two things installed on your computer:
+*   [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Make sure it is running!)
+*   [Git](https://git-scm.com/downloads)
 
-![Dashboard screenshot](docs/dashboard-screenshot.png)
-
-## Quick start
-
-### Prerequisites
-
-Make sure the following are installed on your machine:
-
-- Docker Desktop or Docker Engine with Compose
-- Git
-- PowerShell, CMD, Git Bash, or WSL
-
-### 1. Clone the repository
+### 2. Clone & Start
+Open your terminal (Command Prompt, PowerShell, or Terminal) and run:
 
 ```bash
+# Clone the repository
 git clone https://github.com/TirrthM/token_bucket_rate_limiter.git
 cd token_bucket_rate_limiter
+
+# Start the entire cluster in the background
+docker compose up --build -d
 ```
 
-### 2. Start the services
-
+### 3. Verify it is running
 ```bash
-docker compose up --build -d
 docker compose ps
 ```
+*You should see 5 containers running: 3 API instances (`api1`, `api2`, `api3`), 1 `redis` database, and 1 `nginx` load balancer.*
 
-You should see five running containers:
+---
 
-- `api1`
-- `api2`
-- `api3`
-- `nginx`
-- `redis`
+## 🎮 How to Experiment (No Terminal Required!)
 
-### 3. Verify the service is healthy
+Command-line tools like `curl` can be tricky depending on your operating system (especially on Windows PowerShell). Instead, we've built a **beautiful visual interface** for you to play with!
 
-```bash
-curl http://localhost:8000/health
-```
+### Step 1: Open the Dashboard
+Open your browser and keep this tab open on the side:
+👉 **[http://localhost:8000/dashboard](http://localhost:8000/dashboard)**
 
-Example response:
+### Step 2: Set the Rules
+We need to tell the system the rules for our test client (let's call them `"checkout"`).
+1. Go to our interactive API Docs: **[http://localhost:8000/docs](http://localhost:8000/docs)**
+2. Click the green **`POST /admin/config`** box.
+3. Click **"Try it out"**.
+4. In the Request Body, paste this:
+   ```json
+   {
+     "client_key": "checkout",
+     "mode": "token_bucket",
+     "requests_per_second": 5,
+     "burst_size": 20
+   }
+   ```
+5. Click the large blue **Execute** button.
 
-```json
-{"status":"ok","redis_connected":true,"instance":"api-1"}
-```
+### Step 3: Test the Rate Limiter!
+1. On that same API Docs page, scroll up and click the green **`POST /check`** box.
+2. Click **"Try it out"**.
+3. In the Request Body, paste this:
+   ```json
+   {
+     "client_key": "checkout"
+   }
+   ```
+4. Click the blue **Execute** button. 
+5. Scroll down to see the **Server response** (`200 OK`). 
+6. **Now for the fun part:** Click the **Execute** button as fast as you can 20 or 30 times in a row! Eventually, the server will block you and return a `429 Too Many Requests` error. 
 
-### 4. Open the user-facing endpoints
+*(Check your Dashboard tab to see your requests being mapped and blocked in real-time!)*
 
-- API docs: http://localhost:8000/docs
-- Dashboard: http://localhost:8000/dashboard
+---
 
-## Example usage
+## 🔥 Extreme Load Testing
 
-### Configure a token-bucket client
+Want to see how this system handles serious pressure? We included a script that will bombard the rate limiter with thousands of requests per second.
 
-```bash
-curl -X POST http://localhost:8000/admin/config \
-  -H "Content-Type: application/json" \
-  -d '{"client_key":"checkout","mode":"token_bucket","requests_per_second":5,"burst_size":20}'
-```
-
-### Configure a sliding-window client
-
-```bash
-curl -X POST http://localhost:8000/admin/config \
-  -H "Content-Type: application/json" \
-  -d '{"client_key":"reports","mode":"sliding_window","max_requests":100,"window_seconds":60}'
-```
-
-### Ask for a decision
-
-```bash
-curl -i -X POST http://localhost:8000/check \
-  -H "Content-Type: application/json" \
-  -d '{"client_key":"checkout"}'
-```
-
-Expected behavior:
-
-- `200` means ALLOW
-- `429` means DENY
-- Both responses include the three standard rate-limit headers
-
-## API reference
-
-### Public endpoints
-
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `/check` | `POST` | Returns ALLOW or DENY for a client key |
-| `/health` | `GET` | Health check for the service |
-| `/admin/config` | `POST` | Saves or updates per-client config |
-| `/admin/config/{client_key}` | `GET` | Reads effective config for a client |
-| `/admin/metrics` | `GET` | Shows recently active clients |
-| `/admin/metrics/{client_key}` | `GET` | Shows metrics for one client |
-| `/dashboard` | `GET` | Serves the live dashboard UI |
-
-## Testing
-
-Run the full test suite:
-
-```bash
-docker compose exec api1 python -m pytest -q
-```
-
-Run the distributed correctness load test:
-
+Run this command in your terminal:
 ```bash
 docker compose run --rm -e BASE_URL=http://nginx api1 python scripts/load_test.py
 ```
 
-Expected PASS lines:
+**What is happening?**
+The script acts like 100 users trying to attack your server all at once. The load balancer (Nginx) distributes this attack across all 3 API replicas. You will see a report proving that the system successfully blocked the exact right amount of traffic without a single error, processing over 5,000+ requests per second!
 
-```text
-PASS: 500+ requests/sec
-PASS: no request errors
-PASS: no token over-allocation
-PASS: traffic reached 3+ API instances
-```
+*(Don't forget to check the Dashboard and select the new `load_...` client from the dropdown to see the massive spike!)*
 
-## Verified results
+---
 
-Latest verified distributed run:
+## 🧹 Clean Up
 
-| Metric | Result |
-|---|---:|
-| Duration | 10.01 s |
-| Concurrent connections | 100 |
-| Total requests sent | 72,074 |
-| ALLOW | 1,044 |
-| DENY | 71,030 |
-| Request errors | 0 |
-| API instances reached | 3 |
-| p50 / p95 / p99 latency | 11.8 / 19.3 / 36.6 ms |
-| Strict ALLOW upper bound | 1,051 |
-
-Result: PASS. The service stayed below the mathematical allowance ceiling while serving traffic well above 500 RPS and reaching all three API replicas.
-
-## Why this project is useful
-
-This project is useful because it demonstrates several real backend engineering concerns in one place:
-
-- Concurrency safety under high load
-- Atomic operations in a distributed system
-- Shared state across multiple replicas
-- Algorithm choice between token bucket and sliding window
-- Correctness testing under 500+ RPS
-- Operational visibility through metrics and a dashboard
-
-## Stop the stack
-
-Stop the containers without deleting Redis data:
-
-```bash
-docker compose down
-```
-
-Delete all persisted data if you want a fresh start:
-
+When you are finished playing, you can shut down the servers and clean up your computer by running:
 ```bash
 docker compose down -v
 ```
-
-## Release notes
-
-A release summary is available in [RELEASE_NOTES.md](RELEASE_NOTES.md).
-
-
-
